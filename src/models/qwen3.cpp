@@ -149,11 +149,14 @@ llama_model_qwen3::graph::graph(const llama_model & model, const llm_graph_param
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
 
-    // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    // The isolated full_off PoC keeps all token outputs and pooling intact,
+    // but omits the unused vocabulary projection. host_off keeps this graph.
+    if (cparams.poc_logits_mode != LLAMA_POC_LOGITS_FULL_OFF) {
+        cur = build_lora_mm(model.output, cur, model.output_s);
 
-    cb(cur, "result_output", -1);
-    res->t_logits = cur;
+        cb(cur, "result_output", -1);
+        res->t_logits = cur;
+    }
 
     ggml_build_forward_expand(gf, cur);
 }

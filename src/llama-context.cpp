@@ -14,6 +14,7 @@
 
 #include <cinttypes>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -22,6 +23,15 @@
 //
 // llama_context
 //
+
+static const char * poc_logits_mode_name(llama_poc_logits_mode mode) {
+    switch (mode) {
+        case LLAMA_POC_LOGITS_BASELINE: return "baseline";
+        case LLAMA_POC_LOGITS_HOST_OFF: return "host_off";
+        case LLAMA_POC_LOGITS_FULL_OFF: return "full_off";
+    }
+    GGML_ABORT("invalid PoC logits mode");
+}
 
 static llm_graph_type ctx_type_to_graph_type(llama_context_type ctx_type) {
     switch (ctx_type) {
@@ -236,6 +246,31 @@ llama_context::llama_context(
             cparams.pooling_type = hparams.pooling_type;
         }
     }
+
+    // This experiment is deliberately opt-in and restricted to the two embedding
+    // workloads. An unset variable preserves upstream behavior.
+    const char * poc_mode = std::getenv("POC_LOGITS_MODE");
+    if (poc_mode && std::strcmp(poc_mode, "baseline") != 0) {
+        if (std::strcmp(poc_mode, "host_off") == 0) {
+            cparams.poc_logits_mode = LLAMA_POC_LOGITS_HOST_OFF;
+        } else if (std::strcmp(poc_mode, "full_off") == 0) {
+            cparams.poc_logits_mode = LLAMA_POC_LOGITS_FULL_OFF;
+        } else {
+            throw std::runtime_error("POC_LOGITS_MODE must be baseline, host_off or full_off");
+        }
+
+        if (!cparams.embeddings ||
+            (model.arch != LLM_ARCH_GEMMA_EMBEDDING && model.arch != LLM_ARCH_QWEN3) ||
+            (cparams.pooling_type != LLAMA_POOLING_TYPE_MEAN && cparams.pooling_type != LLAMA_POOLING_TYPE_LAST) ||
+            params.n_samplers != 0 || !sampling.samplers.empty() ||
+            cparams.ctx_type != LLAMA_CONTEXT_TYPE_DEFAULT) {
+            throw std::runtime_error("logits PoC requires Gemma-embedding/Qwen3, embeddings, MEAN/LAST pooling, no samplers and default context type");
+        }
+    }
+
+    LLAMA_LOG_INFO("POC_LOGITS_MODE context=%p mode=%s arch=%s n_vocab=%u n_embd_out=%u pooling=%d\n",
+            (void *) this, poc_logits_mode_name(cparams.poc_logits_mode), model.arch_name().c_str(),
+            model.vocab.n_tokens(), hparams.n_embd_out(), (int) cparams.pooling_type);
 
     if (params.attention_type == LLAMA_ATTENTION_TYPE_UNSPECIFIED) {
         cparams.causal_attn = hparams.causal_attn;
@@ -1146,6 +1181,11 @@ void llama_context::set_abort_callback(bool (*abort_callback)(void * data), void
 }
 
 void llama_context::set_embeddings(bool value) {
+    if (!value && cparams.poc_logits_mode != LLAMA_POC_LOGITS_BASELINE) {
+        LLAMA_LOG_ERROR("%s: cannot disable embeddings in the fixed logits PoC mode\n", __func__);
+        return;
+    }
+
     LLAMA_LOG_DEBUG("%s: value = %d\n", __func__, value);
 
     cparams.embeddings = value;
@@ -1202,6 +1242,11 @@ void llama_context::set_warmup(bool value) {
 }
 
 bool llama_context::set_sampler(llama_seq_id seq_id, llama_sampler * sampler) {
+    if (sampler && cparams.poc_logits_mode != LLAMA_POC_LOGITS_BASELINE) {
+        LLAMA_LOG_ERROR("%s: backend sampling is disabled in the logits PoC\n", __func__);
+        return false;
+    }
+
     if (!sampler && sampling.samplers.count(seq_id) == 0) {
         return true;
     }
@@ -2095,7 +2140,7 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     const auto n_embd     = hparams.n_embd;
     const auto n_embd_out = hparams.n_embd_out();
 
-    bool has_logits     = true;
+    bool has_logits     = cparams.poc_logits_mode == LLAMA_POC_LOGITS_BASELINE;
     bool has_embd       = cparams.embeddings;
     bool has_embd_nextn = cparams.embeddings_nextn;
 
@@ -2175,6 +2220,13 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
             return 0;
         }
         ggml_backend_buffer_clear(buf_output.get(), 0);
+
+        // Only emitted when capacity grows; no logging in steady-state reuse.
+        LLAMA_LOG_INFO("POC_LOGITS_MEMORY context=%p mode=%s buffer_type=%s actual_buf_output_bytes=%zu logits_bytes=%zu embeddings_bytes=%zu n_outputs=%" PRId64 " n_vocab=%u\n",
+                (void *) this, poc_logits_mode_name(cparams.poc_logits_mode),
+                ggml_backend_buffer_name(buf_output.get()),
+                ggml_backend_buffer_get_size(buf_output.get()), logits.size * sizeof(float),
+                embd.size * sizeof(float), n_outputs_max, n_vocab);
     }
 
     float * output_base = (float *) ggml_backend_buffer_get_base(buf_output.get());

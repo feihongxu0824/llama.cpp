@@ -774,6 +774,7 @@ struct llm_graph_params {
 
         return
             cparams.embeddings              == other.cparams.embeddings              &&
+            cparams.poc_logits_mode         == other.cparams.poc_logits_mode         &&
             cparams.embeddings_nextn        == other.cparams.embeddings_nextn        &&
             cparams.embeddings_nextn_masked == other.cparams.embeddings_nextn_masked &&
             cparams.causal_attn             == other.cparams.causal_attn             &&

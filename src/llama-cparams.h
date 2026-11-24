@@ -7,6 +7,13 @@
 
 #define LLAMA_MAX_SEQ 256
 
+// Isolated logits allocation PoC; not part of the public llama.h ABI.
+enum llama_poc_logits_mode {
+    LLAMA_POC_LOGITS_BASELINE,
+    LLAMA_POC_LOGITS_HOST_OFF,
+    LLAMA_POC_LOGITS_FULL_OFF,
+};
+
 struct llama_cparams {
     uint32_t n_ctx;           // context size used during inference
     uint32_t n_ctx_seq;       // context for a single sequence
@@ -32,6 +39,8 @@ struct llama_cparams {
     float yarn_beta_slow;
 
     bool embeddings;
+    // Read once at context creation. Never changed by a runtime setter.
+    llama_poc_logits_mode poc_logits_mode = LLAMA_POC_LOGITS_BASELINE;
     bool embeddings_nextn;        // also extract the hidden state before the final output norm
     bool embeddings_nextn_masked; // extract for only rows where batch.logits != 0
     bool causal_attn;
